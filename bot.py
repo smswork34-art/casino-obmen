@@ -10,11 +10,11 @@ from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-BOT_TOKEN = "8783429061:AAHdivmiLwPts6u2cOUSRp_78RGf81PSP1w"
+BOT_TOKEN = "8692170657:AAHUQjBWkcCAVvchGaMVyWu8jLVjy6cT-ks"
 CRYPTO_TOKEN = "575343:AA8lI3rebCZuc9HxysqN073qP3jLgrz2sx8"
 WEBAPP_URL = "https://smswork34-art.github.io/p2p/index.html"
-CASINO_URL = "https://smswork34-art.github.io/p2p/blackjack.html"
-RENDER_URL = "https://lvk-bot.onrender.com"
+CASINO_URL = "https://smswork34-art.github.io/casino-bot/index.html"
+RENDER_URL = "https://casino-obmen.onrender.com"
 PORT = int(os.getenv("PORT", 10000))
 
 ADMIN_ID = 7518728008
