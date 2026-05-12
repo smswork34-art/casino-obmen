@@ -142,7 +142,7 @@ async def handle_create_invoice(request):
         return resp
     inv_id = create_invoice(user_id, amount)
     pay_url = await create_crypto_invoice(amount, inv_id)
-    resp = web.json_response({"pay_url": pay_url})
+    resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id})
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
