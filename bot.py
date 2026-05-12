@@ -93,10 +93,12 @@ async def check_crypto_invoice(inv_id):
         async with session.get(url, headers=headers, params=params) as resp:
             if resp.status == 200:
                 data = await resp.json()
+                print("CRYPTO RESPONSE:", json.dumps(data, indent=2))
                 if data.get("ok"):
-                    items = data["result"]["items"]
-                    if items and items[0]["status"] == "paid":
-                        return True
+                    items = data["result"].get("items", [])
+                    for item in items:
+                        if item.get("status") == "paid":
+                            return True
     return False
 
 async def create_crypto_invoice(amount, payload):
