@@ -11,7 +11,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 import aiohttp
 
-BOT_TOKEN = "8783429061:AAHdivmiLwPts6u2cOUSRp_78RGf81PSP1w"
+BOT_TOKEN = "8692170657:AAHUQjBWkcCAVvchGaMVyWu8jLVjy6cT-ks"
 CRYPTO_TOKEN = "575343:AA8lI3rebCZuc9HxysqN073qP3jLgrz2sx8"
 WEBAPP_URL = "https://smswork34-art.github.io/p2p/index.html"
 CASINO_URL = "https://smswork34-art.github.io/p2p/blackjack.html"
@@ -19,7 +19,6 @@ RENDER_URL = "https://casino-obmen.onrender.com"
 PORT = int(os.getenv("PORT", 10000))
 
 ADMIN_ID = 7518728008
-ADMINS = [7518728008]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -80,33 +79,29 @@ async def start(msg: types.Message):
     bal = get_balance(msg.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Обменник", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [InlineKeyboardButton(text="Казино", web_app=WebAppInfo(url=CASINO_URL))],
-        [InlineKeyboardButton(text="Пополнить", callback_data="deposit")]
+        [InlineKeyboardButton(text="Казино", web_app=WebAppInfo(url=CASINO_URL))]
     ])
-    await msg.answer(f"Баланс: {bal:.2f} USDT\nВыберите раздел:", reply_markup=kb)
+    await msg.answer(f"Баланс: {bal:.2f} USDT", reply_markup=kb)
 
-@dp.callback_query(F.data == "deposit")
-async def deposit(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.answer("Введите сумму для пополнения в USDT:")
+@dp.message(Command("balance"))
+async def balance_cmd(msg: types.Message):
+    bal = get_balance(msg.from_user.id)
+    await msg.answer(f"Баланс: {bal:.2f} USDT")
 
-@dp.message(F.text.regexp(r"^\d+(\.\d+)?$"))
-async def deposit_amount(msg: types.Message):
-    amount = float(msg.text)
+async def handle_balance(request):
+    user_id = request.match_info.get("user_id", "0")
+    bal = get_balance(int(user_id))
+    return web.json_response({"balance": bal})
+
+async def handle_create_invoice(request):
+    data = await request.json()
+    user_id = int(data.get("user_id", 0))
+    amount = float(data.get("amount", 0))
     if amount < 1:
-        await msg.answer("Минимальная сумма: 1 USDT")
-        return
-    inv_id = create_invoice(msg.from_user.id, amount)
-    pay_link = await create_crypto_invoice(amount, inv_id)
-    if pay_link:
-        await msg.answer(
-            f"Счёт создан на {amount} USDT\n"
-            f"ID: {inv_id}\n"
-            f"[Оплатить через Crypto Bot]({pay_link})",
-            parse_mode="Markdown"
-        )
-    else:
-        await msg.answer("Ошибка создания счёта. Попробуйте позже.")
+        return web.json_response({"error": "Min 1 USDT"}, status=400)
+    inv_id = create_invoice(user_id, amount)
+    pay_url = await create_crypto_invoice(amount, inv_id)
+    return web.json_response({"pay_url": pay_url})
 
 async def create_crypto_invoice(amount, payload):
     url = "https://pay.crypt.bot/api/createInvoice"
@@ -137,16 +132,6 @@ async def handle_crypto_webhook(request):
             add_balance(inv[1], inv[2])
     return web.Response(text="ok")
 
-async def handle_balance(request):
-    user_id = request.match_info.get("user_id", "0")
-    bal = get_balance(int(user_id))
-    return web.json_response({"balance": bal})
-
-@dp.message(Command("balance"))
-async def balance_cmd(msg: types.Message):
-    bal = get_balance(msg.from_user.id)
-    await msg.answer(f"Баланс: {bal:.2f} USDT")
-
 async def on_startup():
     init_db()
     await bot.set_webhook(f"{RENDER_URL}/webhook")
@@ -154,8 +139,9 @@ async def on_startup():
 async def main():
     await on_startup()
     app = web.Application()
-    app.router.add_post("/crypto-webhook", handle_crypto_webhook)
     app.router.add_get("/balance/{user_id}", handle_balance)
+    app.router.add_post("/create-invoice", handle_create_invoice)
+    app.router.add_post("/crypto-webhook", handle_crypto_webhook)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
@@ -164,18 +150,6 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     await asyncio.Event().wait()
-
-async def handle_create_invoice(request):
-    data = await request.json()
-    user_id = int(data.get("user_id", 0))
-    amount = float(data.get("amount", 0))
-    if amount < 1: return web.json_response({"error": "Min 1 USDT"}, status=400)
-    inv_id = create_invoice(user_id, amount)
-    pay_url = await create_crypto_invoice(amount, inv_id)
-    return web.json_response({"pay_url": pay_url})
-
-# В main():
-app.router.add_post("/create-invoice", handle_create_invoice)
 
 if __name__ == "__main__":
     asyncio.run(main())
