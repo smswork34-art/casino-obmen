@@ -18,15 +18,13 @@ CASINO_URL = "https://smswork34-art.github.io/p2p/blackjack.html"
 RENDER_URL = "https://casino-obmen.onrender.com"
 PORT = int(os.getenv("PORT", 10000))
 
-ADMIN_ID = 7518728008
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def init_db():
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0)")
+    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, status TEXT DEFAULT 'pending', created_at TEXT)")
     conn.commit()
     conn.close()
@@ -49,6 +47,21 @@ def add_balance(user_id, amount):
     conn.commit()
     conn.close()
 
+def get_pending_invoices():
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM invoices WHERE status = 'pending'")
+    invs = c.fetchall()
+    conn.close()
+    return invs
+
+def mark_paid(inv_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("UPDATE invoices SET status = 'paid' WHERE id = ?", (inv_id,))
+    conn.commit()
+    conn.close()
+
 def create_invoice(user_id, amount):
     inv_id = str(uuid.uuid4())[:12]
     conn = sqlite3.connect("bot.db")
@@ -59,20 +72,44 @@ def create_invoice(user_id, amount):
     conn.close()
     return inv_id
 
-def get_invoice(inv_id):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("SELECT * FROM invoices WHERE id = ?", (inv_id,))
-    inv = c.fetchone()
-    conn.close()
-    return inv
+async def check_payments():
+    while True:
+        try:
+            invs = get_pending_invoices()
+            for inv in invs:
+                paid = await check_crypto_invoice(inv[0])
+                if paid:
+                    mark_paid(inv[0])
+                    add_balance(inv[1], inv[2])
+        except Exception as e:
+            print("CHECK ERROR:", e)
+        await asyncio.sleep(10)
 
-def mark_paid(inv_id):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("UPDATE invoices SET status = 'paid' WHERE id = ?", (inv_id,))
-    conn.commit()
-    conn.close()
+async def check_crypto_invoice(inv_id):
+    url = "https://pay.crypt.bot/api/getInvoices"
+    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+    params = {"invoice_ids": inv_id}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get("ok"):
+                    items = data["result"]["items"]
+                    if items and items[0]["status"] == "paid":
+                        return True
+    return False
+
+async def create_crypto_invoice(amount, payload):
+    url = "https://pay.crypt.bot/api/createInvoice"
+    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+    data = {"asset": "USDT", "amount": str(amount), "payload": payload}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=data, headers=headers) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                if result.get("ok"):
+                    return result["result"]["pay_url"]
+    return None
 
 @dp.message(Command("start"))
 async def start(msg: types.Message):
@@ -109,37 +146,6 @@ async def handle_create_invoice(request):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
-async def create_crypto_invoice(amount, payload):
-    url = "https://pay.crypt.bot/api/createInvoice"
-    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    data = {
-        "asset": "USDT",
-        "amount": str(amount),
-        "payload": payload,
-        "allow_comments": False,
-        "allow_anonymous": False
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=data, headers=headers) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                if result.get("ok"):
-                    return result["result"]["pay_url"]
-    return None
-
-async def handle_crypto_webhook(request):
-    data = await request.json()
-    payload = data.get("payload", "")
-    status = data.get("status", "")
-    if status == "paid":
-        inv = get_invoice(payload)
-        if inv and inv[3] == "pending":
-            mark_paid(payload)
-            add_balance(inv[1], inv[2])
-    resp = web.Response(text="ok")
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
 async def handle_options(request):
     resp = web.Response(text="ok")
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -149,6 +155,7 @@ async def handle_options(request):
 
 async def on_startup():
     init_db()
+    asyncio.create_task(check_payments())
     await bot.set_webhook(f"{RENDER_URL}/webhook")
 
 async def main():
@@ -156,7 +163,6 @@ async def main():
     app = web.Application()
     app.router.add_get("/balance/{user_id}", handle_balance)
     app.router.add_post("/create-invoice", handle_create_invoice)
-    app.router.add_post("/crypto-webhook", handle_crypto_webhook)
     app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
