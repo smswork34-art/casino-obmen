@@ -25,11 +25,7 @@ def init_db():
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
-    c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, crypto_id TEXT, status TEXT DEFAULT 'pending', created_at TEXT)")
-    try:
-        c.execute("ALTER TABLE invoices ADD COLUMN crypto_id TEXT")
-    except:
-        pass
+    c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, crypto_id INTEGER, status TEXT DEFAULT 'pending', created_at TEXT)")
     conn.commit()
     conn.close()
 
@@ -51,12 +47,12 @@ def add_balance(user_id, amount):
     conn.commit()
     conn.close()
 
-def create_invoice(user_id, amount, crypto_id=""):
+def create_invoice(user_id, amount, crypto_id=0):
     inv_id = str(uuid.uuid4())[:12]
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
     c.execute("INSERT INTO invoices (id, user_id, amount, crypto_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-              (inv_id, user_id, amount, str(crypto_id), datetime.utcnow().isoformat()))
+              (inv_id, user_id, amount, crypto_id, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
     return inv_id
@@ -105,18 +101,6 @@ async def check_crypto_invoice(inv_id):
                             return True
     return False
 
-async def handle_debug(request):
-    url = "https://pay.crypt.bot/api/getInvoices"
-    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    params = {"status": "paid", "count": 3}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
-            data = await resp.json()
-            print("CRYPTO DEBUG:", json.dumps(data, indent=2)[:1000])
-            resp2 = web.json_response(data)
-            resp2.headers["Access-Control-Allow-Origin"] = "*"
-            return resp2
-
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     bal = get_balance(msg.from_user.id)
@@ -136,25 +120,51 @@ async def handle_balance(request):
     bal = get_balance(int(user_id))
     resp = web.json_response({"balance": bal})
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
 
 async def handle_create_invoice(request):
-    data = await request.json()
-    user_id = int(data.get("user_id", 0))
-    amount = float(data.get("amount", 0))
-    if amount < 1:
-        resp = web.json_response({"error": "Min 1 USDT"}, status=400)
+    if request.method == "OPTIONS":
+        resp = web.Response()
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        amount = float(data.get("amount", 0))
+        if amount < 1:
+            resp = web.json_response({"error": "Min 1 USDT"}, status=400)
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp
+        inv_id = create_invoice(user_id, amount)
+        result = await create_crypto_invoice(amount, inv_id)
+        pay_url = result.get("pay_url", "")
+        crypto_id = result.get("crypto_id", 0)
+        if crypto_id:
+            conn = sqlite3.connect("bot.db")
+            c = conn.cursor()
+            c.execute("UPDATE invoices SET crypto_id = ? WHERE id = ?", (crypto_id, inv_id))
+            conn.commit()
+            conn.close()
+        resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
-    result = await create_crypto_invoice(amount, inv_id)
-    pay_url = result.get("pay_url", "")
-    crypto_id = result.get("crypto_id", "")
-    inv_id = create_invoice(user_id, amount, crypto_id)
-    resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id, "crypto_id": crypto_id})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
+    except Exception as e:
+        print("ERROR:", str(e))
+        resp = web.json_response({"error": str(e)}, status=500)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
 async def handle_check_invoice(request):
+    if request.method == "OPTIONS":
+        resp = web.Response()
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
     data = await request.json()
     inv_id = data.get("invoice_id", "")
     paid = await check_crypto_invoice(inv_id)
@@ -167,13 +177,6 @@ async def handle_check_invoice(request):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
-async def handle_options(request):
-    resp = web.Response(text="ok")
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return resp
-
 async def on_startup():
     init_db()
     await bot.set_webhook(f"{RENDER_URL}/webhook")
@@ -182,10 +185,10 @@ async def main():
     await on_startup()
     app = web.Application()
     app.router.add_get("/balance/{user_id}", handle_balance)
-    app.router.add_post("/create-invoice", handle_create_invoice)
-    app.router.add_post("/check-invoice", handle_check_invoice)
-    app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
-    app.router.add_get("/debug", handle_debug)
+    app.router.add_route("POST", "/create-invoice", handle_create_invoice)
+    app.router.add_route("OPTIONS", "/create-invoice", handle_create_invoice)
+    app.router.add_route("POST", "/check-invoice", handle_check_invoice)
+    app.router.add_route("OPTIONS", "/check-invoice", handle_check_invoice)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
