@@ -106,6 +106,18 @@ async def check_crypto_invoice(inv_id):
                             return True
     return False
 
+async def handle_debug(request):
+    url = "https://pay.crypt.bot/api/getInvoices"
+    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+    params = {"status": "paid", "count": 3}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            data = await resp.json()
+            print("CRYPTO DEBUG:", json.dumps(data, indent=2)[:1000])
+            resp2 = web.json_response(data)
+            resp2.headers["Access-Control-Allow-Origin"] = "*"
+            return resp2
+
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     bal = get_balance(msg.from_user.id)
@@ -174,6 +186,7 @@ async def main():
     app.router.add_post("/create-invoice", handle_create_invoice)
     app.router.add_post("/check-invoice", handle_check_invoice)
     app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
+    app.router.add_get("/debug", handle_debug)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
