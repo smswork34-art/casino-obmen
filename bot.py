@@ -14,7 +14,7 @@ import aiohttp
 BOT_TOKEN = "8692170657:AAHUQjBWkcCAVvchGaMVyWu8jLVjy6cT-ks"
 CRYPTO_TOKEN = "575343:AA8lI3rebCZuc9HxysqN073qP3jLgrz2sx8"
 WEBAPP_URL = "https://smswork34-art.github.io/p2p/index.html"
-CASINO_URL = "https://smswork34-art.github.io/p2p/blackjack.html"
+CASINO_URL = "https://smswork34-art.github.io/obmen-bot/index.html"
 RENDER_URL = "https://casino-obmen.onrender.com"
 PORT = int(os.getenv("PORT", 10000))
 
