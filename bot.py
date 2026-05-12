@@ -91,17 +91,23 @@ async def balance_cmd(msg: types.Message):
 async def handle_balance(request):
     user_id = request.match_info.get("user_id", "0")
     bal = get_balance(int(user_id))
-    return web.json_response({"balance": bal})
+    resp = web.json_response({"balance": bal})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 async def handle_create_invoice(request):
     data = await request.json()
     user_id = int(data.get("user_id", 0))
     amount = float(data.get("amount", 0))
     if amount < 1:
-        return web.json_response({"error": "Min 1 USDT"}, status=400)
+        resp = web.json_response({"error": "Min 1 USDT"}, status=400)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
     inv_id = create_invoice(user_id, amount)
     pay_url = await create_crypto_invoice(amount, inv_id)
-    return web.json_response({"pay_url": pay_url})
+    resp = web.json_response({"pay_url": pay_url})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 async def create_crypto_invoice(amount, payload):
     url = "https://pay.crypt.bot/api/createInvoice"
@@ -130,7 +136,16 @@ async def handle_crypto_webhook(request):
         if inv and inv[3] == "pending":
             mark_paid(payload)
             add_balance(inv[1], inv[2])
-    return web.Response(text="ok")
+    resp = web.Response(text="ok")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+async def handle_options(request):
+    resp = web.Response(text="ok")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
 
 async def on_startup():
     init_db()
@@ -142,6 +157,7 @@ async def main():
     app.router.add_get("/balance/{user_id}", handle_balance)
     app.router.add_post("/create-invoice", handle_create_invoice)
     app.router.add_post("/crypto-webhook", handle_crypto_webhook)
+    app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
