@@ -25,7 +25,11 @@ def init_db():
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
-    c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, status TEXT DEFAULT 'pending', created_at TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, crypto_id TEXT, status TEXT DEFAULT 'pending', created_at TEXT)")
+    try:
+        c.execute("ALTER TABLE invoices ADD COLUMN crypto_id TEXT")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -47,12 +51,12 @@ def add_balance(user_id, amount):
     conn.commit()
     conn.close()
 
-def create_invoice(user_id, amount):
+def create_invoice(user_id, amount, crypto_id=""):
     inv_id = str(uuid.uuid4())[:12]
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute("INSERT INTO invoices (id, user_id, amount, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-              (inv_id, user_id, amount, datetime.utcnow().isoformat()))
+    c.execute("INSERT INTO invoices (id, user_id, amount, crypto_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+              (inv_id, user_id, amount, str(crypto_id), datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
     return inv_id
@@ -81,13 +85,16 @@ async def create_crypto_invoice(amount, payload):
             if resp.status == 200:
                 result = await resp.json()
                 if result.get("ok"):
-                    return result["result"]["pay_url"]
-    return None
+                    return {
+                        "pay_url": result["result"]["pay_url"],
+                        "crypto_id": result["result"]["invoice_id"]
+                    }
+    return {}
 
 async def check_crypto_invoice(inv_id):
     url = "https://pay.crypt.bot/api/getInvoices"
     headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    params = {"invoice_ids": inv_id}
+    params = {"status": "paid"}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
             if resp.status == 200:
@@ -95,7 +102,7 @@ async def check_crypto_invoice(inv_id):
                 if data.get("ok"):
                     items = data["result"].get("items", [])
                     for item in items:
-                        if item.get("status") == "paid":
+                        if item.get("payload") == inv_id:
                             return True
     return False
 
@@ -120,20 +127,6 @@ async def handle_balance(request):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
-async def create_crypto_invoice(amount, payload):
-    url = "https://pay.crypt.bot/api/createInvoice"
-    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    data = {"asset": "USDT", "amount": str(amount), "payload": payload}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=data, headers=headers) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                print("CRYPTO CREATE:", json.dumps(result, indent=2))
-                if result.get("ok"):
-                    crypto_id = result["result"]["invoice_id"]
-                    return {"pay_url": result["result"]["pay_url"], "crypto_id": crypto_id}
-    return {}
-
 async def handle_create_invoice(request):
     data = await request.json()
     user_id = int(data.get("user_id", 0))
@@ -142,11 +135,10 @@ async def handle_create_invoice(request):
         resp = web.json_response({"error": "Min 1 USDT"}, status=400)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
-    inv_id = create_invoice(user_id, amount)
-    result = await create_crypto_invoice(amount, inv_id)
+    result = await create_crypto_invoice(amount, "")
     pay_url = result.get("pay_url", "")
     crypto_id = result.get("crypto_id", "")
-    print(f"INV {inv_id} -> CRYPTO {crypto_id}")
+    inv_id = create_invoice(user_id, amount, crypto_id)
     resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id, "crypto_id": crypto_id})
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
@@ -155,10 +147,9 @@ async def handle_check_invoice(request):
     data = await request.json()
     inv_id = data.get("invoice_id", "")
     paid = await check_crypto_invoice(inv_id)
-    print(f"CHECK {inv_id}: {paid}")
     if paid:
         inv = get_invoice(inv_id)
-        if inv and inv[3] == "pending":
+        if inv and inv[4] == "pending":
             mark_paid(inv_id)
             add_balance(inv[1], inv[2])
     resp = web.json_response({"paid": paid})
