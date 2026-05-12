@@ -94,15 +94,14 @@ async def create_crypto_invoice(amount, payload):
 async def check_crypto_invoice(inv_id):
     url = "https://pay.crypt.bot/api/getInvoices"
     headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    params = {"status": "paid"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
+        async with session.get(url, headers=headers) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get("ok"):
                     items = data["result"].get("items", [])
                     for item in items:
-                        if item.get("payload") == inv_id:
+                        if item.get("payload") == inv_id and item.get("status") == "paid":
                             return True
     return False
 
@@ -147,7 +146,7 @@ async def handle_create_invoice(request):
         resp = web.json_response({"error": "Min 1 USDT"}, status=400)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
-    result = await create_crypto_invoice(amount, "")
+    result = await create_crypto_invoice(amount, inv_id)
     pay_url = result.get("pay_url", "")
     crypto_id = result.get("crypto_id", "")
     inv_id = create_invoice(user_id, amount, crypto_id)
