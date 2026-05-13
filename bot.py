@@ -1,200 +1,226 @@
 import asyncio
 import os
-import sqlite3
-import json
-import uuid
-from datetime import datetime
+from decimal import Decimal
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.filters import Command
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
-import aiohttp
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from supabase import create_client, Client
 
-BOT_TOKEN = "8692170657:AAHUQjBWkcCAVvchGaMVyWu8jLVjy6cT-ks"
-CRYPTO_TOKEN = "575343:AA8lI3rebCZuc9HxysqN073qP3jLgrz2sx8"
-WEBAPP_URL = "https://smswork34-art.github.io/p2p/index.html"
-CASINO_URL = "https://smswork34-art.github.io/p2p/blackjack.html"
-RENDER_URL = "https://casino-obmen.onrender.com"
-PORT = int(os.getenv("PORT", 10000))
+# Конфигурация
+BOT_TOKEN = "8714933043:AAHIP0WJk1SycaKYawxIpT555q1cR4yYlkg"
+ADMIN_ID = 7518728008
+SUPABASE_URL = "https://cpvgdwhcumzbjiurlemm.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNwdmdkd2hjdW16YmppdXJsZW1tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MjQ4MTksImV4cCI6MjA5NDEwMDgxOX0.kWU2RgofpNUnR74aYWJpw0OCU7c5taDtu69nlXircpM"
 
+# Инициализация
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def init_db():
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
-    c.execute("CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, user_id INTEGER, amount REAL, crypto_id INTEGER, status TEXT DEFAULT 'pending', created_at TEXT)")
-    conn.commit()
-    conn.close()
+# Состояния
+class PaymentStates(StatesGroup):
+    waiting_for_amount = State()
 
-def get_balance(user_id):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
-    c.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
-    bal = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return bal
+# Временное хранилище для связи файла с пользователем
+file_user_map = {}
 
-def set_balance(user_id, amount):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
-    c.execute("UPDATE users SET balance = ? WHERE id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-
-def add_balance(user_id, amount):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
-    c.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-
-def create_invoice(user_id, amount, crypto_id=0):
-    inv_id = str(uuid.uuid4())[:12]
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO invoices (id, user_id, amount, crypto_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-              (inv_id, user_id, amount, crypto_id, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
-    return inv_id
-
-def get_invoice(inv_id):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("SELECT * FROM invoices WHERE id = ?", (inv_id,))
-    inv = c.fetchone()
-    conn.close()
-    return inv
-
-def mark_paid(inv_id):
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("UPDATE invoices SET status = 'paid' WHERE id = ?", (inv_id,))
-    conn.commit()
-    conn.close()
-
-async def create_crypto_invoice(amount, payload):
-    url = "https://pay.crypt.bot/api/createInvoice"
-    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    data = {"asset": "USDT", "amount": str(amount), "payload": payload}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=data, headers=headers) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                if result.get("ok"):
-                    return {
-                        "pay_url": result["result"]["pay_url"],
-                        "crypto_id": result["result"]["invoice_id"]
-                    }
-    return {}
-
-async def check_crypto_invoice(inv_id):
-    url = "https://pay.crypt.bot/api/getInvoices"
-    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get("ok"):
-                    items = data["result"].get("items", [])
-                    for item in items:
-                        if item.get("payload") == inv_id and item.get("status") == "paid":
-                            return True
-    return False
-
-@dp.message(Command("start"))
-async def start(msg: types.Message):
-    bal = get_balance(msg.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Обменник", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [InlineKeyboardButton(text="Казино", web_app=WebAppInfo(url=CASINO_URL))]
+# Клавиатуры
+def get_start_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Загрузить токены", callback_data="upload_tokens")]
     ])
-    await msg.answer(f"Баланс: {bal:.2f} USDT", reply_markup=kb)
+
+def get_admin_keyboard(file_id: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Блок", callback_data=f"block_{file_id}")],
+        [InlineKeyboardButton(text="💰 Ввести кол-во оплаты", callback_data=f"amount_{file_id}")],
+        [InlineKeyboardButton(text="🔄 Слет все сразу", callback_data=f"decline_{file_id}")]
+    ])
+
+# Обработчики
+@dp.message(Command("start"))
+async def start_command(message: types.Message):
+    # Сохраняем пользователя в БД
+    try:
+        supabase.table("users").upsert({
+            "user_id": message.from_user.id,
+            "username": message.from_user.username,
+            "first_name": message.from_user.first_name
+        }).execute()
+    except Exception as e:
+        print(f"Error saving user: {e}")
+    
+    await message.answer(
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        "Я бот для приёмки токенов MAX на RENDER.\n"
+        "Нажми кнопку ниже, чтобы загрузить файл с токенами.",
+        reply_markup=get_start_keyboard()
+    )
+
+@dp.callback_query(F.data == "upload_tokens")
+async def upload_tokens(callback: types.CallbackQuery):
+    await callback.message.answer("📎 Пожалуйста, загрузите файл токенов в формате .txt")
+    await callback.answer()
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    if not message.document.file_name.endswith('.txt'):
+        await message.answer("❌ Пожалуйста, загрузите файл в формате .txt")
+        return
+    
+    # Сохраняем связь файла с пользователем
+    file_id = message.document.file_id
+    file_user_map[file_id] = {
+        "user_id": message.from_user.id,
+        "username": message.from_user.username,
+        "first_name": message.from_user.first_name,
+        "file_name": message.document.file_name
+    }
+    
+    # Создаем транзакцию в БД
+    try:
+        supabase.table("transactions").insert({
+            "user_id": message.from_user.id,
+            "file_name": message.document.file_name,
+            "status": "pending",
+            "amount": 0
+        }).execute()
+    except Exception as e:
+        print(f"Error creating transaction: {e}")
+    
+    # Пересылаем файл админу
+    await bot.send_document(
+        ADMIN_ID,
+        message.document.file_id,
+        caption=f"📄 Файл от @{message.from_user.username or 'нет юзернейма'} "
+                f"(ID: {message.from_user.id})\n"
+                f"Имя: {message.from_user.first_name}",
+        reply_markup=get_admin_keyboard(file_id)
+    )
+    
+    await message.answer("✅ Файл загружен, ожидайте пополнение счета")
+
+@dp.callback_query(F.data.startswith("block_"))
+async def block_file(callback: types.CallbackQuery):
+    file_id = callback.data.replace("block_", "")
+    user_data = file_user_map.get(file_id)
+    
+    if user_data:
+        # Обновляем статус в БД
+        supabase.table("transactions").update({"status": "blocked"}).eq(
+            "user_id", user_data["user_id"]
+        ).eq("status", "pending").execute()
+        
+        # Отправляем уведомление пользователю
+        await bot.send_message(
+            user_data["user_id"],
+            "❌ Блок, нет оплаты"
+        )
+        
+        await callback.message.edit_caption(
+            callback.message.caption + "\n\n❌ ЗАБЛОКИРОВАНО",
+            reply_markup=None
+        )
+    
+    await callback.answer("Файл заблокирован")
+
+@dp.callback_query(F.data.startswith("decline_"))
+async def decline_file(callback: types.CallbackQuery):
+    file_id = callback.data.replace("decline_", "")
+    user_data = file_user_map.get(file_id)
+    
+    if user_data:
+        # Обновляем статус в БД
+        supabase.table("transactions").update({"status": "declined"}).eq(
+            "user_id", user_data["user_id"]
+        ).eq("status", "pending").execute()
+        
+        await bot.send_message(
+            user_data["user_id"],
+            "🔄 Всё слет, не оплата"
+        )
+        
+        await callback.message.edit_caption(
+            callback.message.caption + "\n\n🔄 СЛЕТ",
+            reply_markup=None
+        )
+    
+    await callback.answer("Файл отклонён")
+
+@dp.callback_query(F.data.startswith("amount_"))
+async def set_amount(callback: types.CallbackQuery, state: FSMContext):
+    file_id = callback.data.replace("amount_", "")
+    user_data = file_user_map.get(file_id)
+    
+    if user_data:
+        await state.update_data(current_file_id=file_id, current_user_id=user_data["user_id"])
+        await state.set_state(PaymentStates.waiting_for_amount)
+        await callback.message.answer("💰 Введите сумму оплаты в долларах (например 5.50):")
+    
+    await callback.answer()
+
+@dp.message(PaymentStates.waiting_for_amount)
+async def process_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = Decimal(message.text.replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+        
+        data = await state.get_data()
+        user_id = data["current_user_id"]
+        file_id = data["current_file_id"]
+        
+        # Обновляем баланс пользователя
+        current_user = supabase.table("users").select("balance").eq("user_id", user_id).execute()
+        if current_user.data:
+            new_balance = Decimal(str(current_user.data[0]["balance"])) + amount
+        else:
+            new_balance = amount
+        
+        # Обновляем в БД
+        supabase.table("users").update({"balance": float(new_balance)}).eq("user_id", user_id).execute()
+        supabase.table("transactions").update({
+            "status": "paid",
+            "amount": float(amount)
+        }).eq("user_id", user_id).eq("status", "pending").execute()
+        
+        # Уведомляем пользователя
+        await bot.send_message(
+            user_id,
+            f"✅ Ваш баланс пополнен на ${amount:.2f}\n"
+            f"💰 Текущий баланс: ${new_balance:.2f}"
+        )
+        
+        await message.answer(f"✅ Баланс пользователя пополнен на ${amount:.2f}")
+        await state.clear()
+        
+    except (ValueError, Decimal.InvalidOperation):
+        await message.answer("❌ Пожалуйста, введите корректную сумму (например 5.50)")
 
 @dp.message(Command("balance"))
-async def balance_cmd(msg: types.Message):
-    bal = get_balance(msg.from_user.id)
-    await msg.answer(f"Баланс: {bal:.2f} USDT")
-
-async def handle_balance(request):
-    user_id = request.match_info.get("user_id", "0")
-    bal = get_balance(int(user_id))
-    resp = web.json_response({"balance": bal})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-async def handle_update_balance(request):
-    data = await request.json()
-    user_id = int(data.get("user_id", 0))
-    amount = float(data.get("amount", 0))
-    set_balance(user_id, amount)
-    resp = web.json_response({"ok": True})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-async def handle_create_invoice(request):
-    data = await request.json()
-    user_id = int(data.get("user_id", 0))
-    amount = float(data.get("amount", 0))
-    if amount < 1:
-        resp = web.json_response({"error": "Min 1 USDT"}, status=400)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
-    result = await create_crypto_invoice(amount, "")
-    pay_url = result.get("pay_url", "")
-    crypto_id = result.get("crypto_id", 0)
-    inv_id = create_invoice(user_id, amount, crypto_id)
-    resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-async def handle_check_invoice(request):
-    data = await request.json()
-    inv_id = data.get("invoice_id", "")
-    paid = await check_crypto_invoice(inv_id)
-    if paid:
-        inv = get_invoice(inv_id)
-        if inv and inv[4] == "pending":
-            mark_paid(inv_id)
-            add_balance(inv[1], inv[2])
-    resp = web.json_response({"paid": paid})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-async def handle_options(request):
-    resp = web.Response(text="ok")
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return resp
-
-async def on_startup():
-    init_db()
-    await bot.set_webhook(f"{RENDER_URL}/webhook")
+async def check_balance(message: types.Message):
+    try:
+        result = supabase.table("users").select("balance").eq("user_id", message.from_user.id).execute()
+        if result.data:
+            balance = Decimal(str(result.data[0]["balance"]))
+            await message.answer(f"💰 Ваш баланс: ${balance:.2f}")
+        else:
+            await message.answer("💰 Ваш баланс: $0.00")
+    except Exception as e:
+        await message.answer("❌ Ошибка при получении баланса")
 
 async def main():
-    await on_startup()
-    app = web.Application()
-    app.router.add_get("/balance/{user_id}", handle_balance)
-    app.router.add_post("/create-invoice", handle_create_invoice)
-    app.router.add_post("/check-invoice", handle_check_invoice)
-    app.router.add_post("/update-balance", handle_update_balance)
-    app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
-    handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    handler.register(app, path="/webhook")
-    setup_application(app, dp, bot=bot)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    await asyncio.Event().wait()
+    # Создаем таблицы при первом запуске (если нужно)
+    try:
+        supabase.table("users").select("count").limit(1).execute()
+    except:
+        print("Таблицы не найдены. Создайте их в Supabase SQL Editor")
+    
+    print("Бот запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
