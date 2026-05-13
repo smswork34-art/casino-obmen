@@ -1,2 +1,4 @@
-aiogram
-aiohttp
+aiogram==3.3.0
+supabase==1.0.3
+python-decouple==3.8
+httpx==0.25.0
