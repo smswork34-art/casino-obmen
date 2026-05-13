@@ -1,5 +1,5 @@
 import asyncio
-import os
+import json
 from decimal import Decimal
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from supabase import create_client, Client
+import httpx
 
 # Конфигурация
 BOT_TOKEN = "8714933043:AAHIP0WJk1SycaKYawxIpT555q1cR4yYlkg"
@@ -18,14 +18,52 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Состояния
-class PaymentStates(StatesGroup):
-    waiting_for_amount = State()
 
 # Временное хранилище для связи файла с пользователем
 file_user_map = {}
+
+# Состояния FSM
+class PaymentStates(StatesGroup):
+    waiting_for_amount = State()
+
+# HTTP клиент для Supabase REST API
+async def supabase_query(method, table, data=None, filters=None):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Добавляем фильтры в URL
+    if filters:
+        params = []
+        for key, value in filters.items():
+            if key == "select":
+                params.append(f"select={value}")
+            elif key == "eq":
+                for field, val in value.items():
+                    params.append(f"{field}=eq.{val}")
+        if params:
+            url += "?" + "&".join(params)
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            if method == "GET":
+                response = await client.get(url, headers=headers)
+            elif method == "POST":
+                response = await client.post(url, headers=headers, json=data)
+            elif method == "PATCH":
+                response = await client.patch(url, headers=headers, json=data)
+            
+            if response.status_code in [200, 201]:
+                return response.json() if response.text else []
+            else:
+                print(f"Supabase error: {response.status_code} - {response.text}")
+                return []
+        except Exception as e:
+            print(f"Request error: {e}")
+            return []
 
 # Клавиатуры
 def get_start_keyboard():
@@ -44,14 +82,20 @@ def get_admin_keyboard(file_id: str):
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     # Сохраняем пользователя в БД
-    try:
-        supabase.table("users").upsert({
-            "user_id": message.from_user.id,
-            "username": message.from_user.username,
-            "first_name": message.from_user.first_name
-        }).execute()
-    except Exception as e:
-        print(f"Error saving user: {e}")
+    user_data = {
+        "user_id": message.from_user.id,
+        "username": message.from_user.username,
+        "first_name": message.from_user.first_name,
+        "balance": 0.00
+    }
+    
+    # Проверяем существует ли пользователь
+    existing = await supabase_query("GET", "users", filters={
+        "eq": {"user_id": message.from_user.id}
+    })
+    
+    if not existing:
+        await supabase_query("POST", "users", data=user_data)
     
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
@@ -81,23 +125,19 @@ async def handle_document(message: types.Message):
     }
     
     # Создаем транзакцию в БД
-    try:
-        supabase.table("transactions").insert({
-            "user_id": message.from_user.id,
-            "file_name": message.document.file_name,
-            "status": "pending",
-            "amount": 0
-        }).execute()
-    except Exception as e:
-        print(f"Error creating transaction: {e}")
+    transaction_data = {
+        "user_id": message.from_user.id,
+        "file_name": message.document.file_name,
+        "status": "pending",
+        "amount": 0.00
+    }
+    await supabase_query("POST", "transactions", data=transaction_data)
     
     # Пересылаем файл админу
     await bot.send_document(
         ADMIN_ID,
         message.document.file_id,
-        caption=f"📄 Файл от @{message.from_user.username or 'нет юзернейма'} "
-                f"(ID: {message.from_user.id})\n"
-                f"Имя: {message.from_user.first_name}",
+        caption=f"📄 Файл от @{message.from_user.username or 'нет юзернейма'} (ID: {message.from_user.id})\nИмя: {message.from_user.first_name}",
         reply_markup=get_admin_keyboard(file_id)
     )
     
@@ -109,17 +149,16 @@ async def block_file(callback: types.CallbackQuery):
     user_data = file_user_map.get(file_id)
     
     if user_data:
-        # Обновляем статус в БД
-        supabase.table("transactions").update({"status": "blocked"}).eq(
-            "user_id", user_data["user_id"]
-        ).eq("status", "pending").execute()
-        
-        # Отправляем уведомление пользователю
-        await bot.send_message(
-            user_data["user_id"],
-            "❌ Блок, нет оплаты"
+        # Обновляем статус транзакции
+        await supabase_query("PATCH", "transactions", 
+            data={"status": "blocked"},
+            filters={"eq": {"user_id": user_data["user_id"], "status": "pending"}}
         )
         
+        # Уведомляем пользователя
+        await bot.send_message(user_data["user_id"], "❌ Блок, нет оплаты")
+        
+        # Обновляем сообщение админу
         await callback.message.edit_caption(
             callback.message.caption + "\n\n❌ ЗАБЛОКИРОВАНО",
             reply_markup=None
@@ -133,15 +172,12 @@ async def decline_file(callback: types.CallbackQuery):
     user_data = file_user_map.get(file_id)
     
     if user_data:
-        # Обновляем статус в БД
-        supabase.table("transactions").update({"status": "declined"}).eq(
-            "user_id", user_data["user_id"]
-        ).eq("status", "pending").execute()
-        
-        await bot.send_message(
-            user_data["user_id"],
-            "🔄 Всё слет, не оплата"
+        await supabase_query("PATCH", "transactions",
+            data={"status": "declined"},
+            filters={"eq": {"user_id": user_data["user_id"], "status": "pending"}}
         )
+        
+        await bot.send_message(user_data["user_id"], "🔄 Всё слет, не оплата")
         
         await callback.message.edit_caption(
             callback.message.caption + "\n\n🔄 СЛЕТ",
@@ -171,54 +207,47 @@ async def process_amount(message: types.Message, state: FSMContext):
         
         data = await state.get_data()
         user_id = data["current_user_id"]
-        file_id = data["current_file_id"]
         
-        # Обновляем баланс пользователя
-        current_user = supabase.table("users").select("balance").eq("user_id", user_id).execute()
-        if current_user.data:
-            new_balance = Decimal(str(current_user.data[0]["balance"])) + amount
-        else:
-            new_balance = amount
+        # Получаем текущий баланс
+        user_data = await supabase_query("GET", "users", filters={"eq": {"user_id": user_id}})
+        current_balance = Decimal(str(user_data[0]["balance"])) if user_data else Decimal("0")
+        new_balance = current_balance + amount
         
-        # Обновляем в БД
-        supabase.table("users").update({"balance": float(new_balance)}).eq("user_id", user_id).execute()
-        supabase.table("transactions").update({
-            "status": "paid",
-            "amount": float(amount)
-        }).eq("user_id", user_id).eq("status", "pending").execute()
+        # Обновляем баланс
+        await supabase_query("PATCH", "users",
+            data={"balance": float(new_balance)},
+            filters={"eq": {"user_id": user_id}}
+        )
+        
+        # Обновляем транзакцию
+        await supabase_query("PATCH", "transactions",
+            data={"status": "paid", "amount": float(amount)},
+            filters={"eq": {"user_id": user_id, "status": "pending"}}
+        )
         
         # Уведомляем пользователя
         await bot.send_message(
             user_id,
-            f"✅ Ваш баланс пополнен на ${amount:.2f}\n"
-            f"💰 Текущий баланс: ${new_balance:.2f}"
+            f"✅ Ваш баланс пополнен на ${amount:.2f}\n💰 Текущий баланс: ${new_balance:.2f}"
         )
         
         await message.answer(f"✅ Баланс пользователя пополнен на ${amount:.2f}")
         await state.clear()
         
-    except (ValueError, Decimal.InvalidOperation):
+    except (ValueError, Exception) as e:
         await message.answer("❌ Пожалуйста, введите корректную сумму (например 5.50)")
+        print(f"Error: {e}")
 
 @dp.message(Command("balance"))
 async def check_balance(message: types.Message):
-    try:
-        result = supabase.table("users").select("balance").eq("user_id", message.from_user.id).execute()
-        if result.data:
-            balance = Decimal(str(result.data[0]["balance"]))
-            await message.answer(f"💰 Ваш баланс: ${balance:.2f}")
-        else:
-            await message.answer("💰 Ваш баланс: $0.00")
-    except Exception as e:
-        await message.answer("❌ Ошибка при получении баланса")
+    user_data = await supabase_query("GET", "users", filters={"eq": {"user_id": message.from_user.id}})
+    if user_data:
+        balance = Decimal(str(user_data[0]["balance"]))
+        await message.answer(f"💰 Ваш баланс: ${balance:.2f}")
+    else:
+        await message.answer("💰 Ваш баланс: $0.00")
 
 async def main():
-    # Создаем таблицы при первом запуске (если нужно)
-    try:
-        supabase.table("users").select("count").limit(1).execute()
-    except:
-        print("Таблицы не найдены. Создайте их в Supabase SQL Editor")
-    
     print("Бот запущен!")
     await dp.start_polling(bot)
 
