@@ -39,6 +39,14 @@ def get_balance(user_id):
     conn.close()
     return bal
 
+def set_balance(user_id, amount):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
+    c.execute("UPDATE users SET balance = ? WHERE id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
 def add_balance(user_id, amount):
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
@@ -120,51 +128,34 @@ async def handle_balance(request):
     bal = get_balance(int(user_id))
     resp = web.json_response({"balance": bal})
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+async def handle_update_balance(request):
+    data = await request.json()
+    user_id = int(data.get("user_id", 0))
+    amount = float(data.get("amount", 0))
+    set_balance(user_id, amount)
+    resp = web.json_response({"ok": True})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
 async def handle_create_invoice(request):
-    if request.method == "OPTIONS":
-        resp = web.Response()
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return resp
-    try:
-        data = await request.json()
-        user_id = int(data.get("user_id", 0))
-        amount = float(data.get("amount", 0))
-        if amount < 1:
-            resp = web.json_response({"error": "Min 1 USDT"}, status=400)
-            resp.headers["Access-Control-Allow-Origin"] = "*"
-            return resp
-        inv_id = create_invoice(user_id, amount)
-        result = await create_crypto_invoice(amount, inv_id)
-        pay_url = result.get("pay_url", "")
-        crypto_id = result.get("crypto_id", 0)
-        if crypto_id:
-            conn = sqlite3.connect("bot.db")
-            c = conn.cursor()
-            c.execute("UPDATE invoices SET crypto_id = ? WHERE id = ?", (crypto_id, inv_id))
-            conn.commit()
-            conn.close()
-        resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id})
+    data = await request.json()
+    user_id = int(data.get("user_id", 0))
+    amount = float(data.get("amount", 0))
+    if amount < 1:
+        resp = web.json_response({"error": "Min 1 USDT"}, status=400)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
-    except Exception as e:
-        print("ERROR:", str(e))
-        resp = web.json_response({"error": str(e)}, status=500)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
+    result = await create_crypto_invoice(amount, "")
+    pay_url = result.get("pay_url", "")
+    crypto_id = result.get("crypto_id", 0)
+    inv_id = create_invoice(user_id, amount, crypto_id)
+    resp = web.json_response({"pay_url": pay_url, "invoice_id": inv_id})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 async def handle_check_invoice(request):
-    if request.method == "OPTIONS":
-        resp = web.Response()
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return resp
     data = await request.json()
     inv_id = data.get("invoice_id", "")
     paid = await check_crypto_invoice(inv_id)
@@ -177,18 +168,11 @@ async def handle_check_invoice(request):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
-async def handle_update_balance(request):
-    data = await request.json()
-    user_id = int(data.get("user_id", 0))
-    amount = float(data.get("amount", 0))
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
-    c.execute("UPDATE users SET balance = ? WHERE id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-    resp = web.json_response({"ok": True})
+async def handle_options(request):
+    resp = web.Response(text="ok")
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
 
 async def on_startup():
@@ -202,7 +186,6 @@ async def main():
     app.router.add_post("/create-invoice", handle_create_invoice)
     app.router.add_post("/check-invoice", handle_check_invoice)
     app.router.add_post("/update-balance", handle_update_balance)
-    # CORS для всех методов
     app.router.add_route("OPTIONS", "/{path:.*}", handle_options)
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path="/webhook")
