@@ -177,6 +177,20 @@ async def handle_check_invoice(request):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
+async def handle_update_balance(request):
+    data = await request.json()
+    user_id = int(data.get("user_id", 0))
+    amount = float(data.get("amount", 0))
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (id, balance) VALUES (?, 0)", (user_id,))
+    c.execute("UPDATE users SET balance = ? WHERE id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+    resp = web.json_response({"ok": True})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
 async def on_startup():
     init_db()
     await bot.set_webhook(f"{RENDER_URL}/webhook")
