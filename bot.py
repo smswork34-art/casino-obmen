@@ -1,5 +1,5 @@
 import asyncio
-import json
+import sqlite3
 from decimal import Decimal
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -7,13 +7,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import httpx
+from datetime import datetime
 
 # Конфигурация
 BOT_TOKEN = "8714933043:AAHIP0WJk1SycaKYawxIpT555q1cR4yYlkg"
 ADMIN_ID = 7518728008
-SUPABASE_URL = "https://cpvgdwhcumzbjiurlemm.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNwdmdkd2hjdW16YmppdXJsZW1tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MjQ4MTksImV4cCI6MjA5NDEwMDgxOX0.kWU2RgofpNUnR74aYWJpw0OCU7c5taDtu69nlXircpM"
 
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
@@ -26,44 +24,89 @@ file_user_map = {}
 class PaymentStates(StatesGroup):
     waiting_for_amount = State()
 
-# HTTP клиент для Supabase REST API
-async def supabase_query(method, table, data=None, filters=None):
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
-    }
+# Инициализация БД
+def init_db():
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
     
-    # Добавляем фильтры в URL
-    if filters:
-        params = []
-        for key, value in filters.items():
-            if key == "select":
-                params.append(f"select={value}")
-            elif key == "eq":
-                for field, val in value.items():
-                    params.append(f"{field}=eq.{val}")
-        if params:
-            url += "?" + "&".join(params)
+    # Таблица пользователей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            balance REAL DEFAULT 0.0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            if method == "GET":
-                response = await client.get(url, headers=headers)
-            elif method == "POST":
-                response = await client.post(url, headers=headers, json=data)
-            elif method == "PATCH":
-                response = await client.patch(url, headers=headers, json=data)
-            
-            if response.status_code in [200, 201]:
-                return response.json() if response.text else []
-            else:
-                print(f"Supabase error: {response.status_code} - {response.text}")
-                return []
-        except Exception as e:
-            print(f"Request error: {e}")
-            return []
+    # Таблица транзакций
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            file_name TEXT,
+            amount REAL DEFAULT 0.0,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Работа с БД
+def add_user(user_id, username, first_name):
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)',
+        (user_id, username, first_name)
+    )
+    conn.commit()
+    conn.close()
+
+def get_balance(user_id):
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 0.0
+
+def update_balance(user_id, amount):
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE users SET balance = balance + ? WHERE user_id = ?',
+        (amount, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+def add_transaction(user_id, file_name):
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO transactions (user_id, file_name, status, amount) VALUES (?, ?, ?, ?)',
+        (user_id, file_name, 'pending', 0.0)
+    )
+    conn.commit()
+    conn.close()
+
+def update_transaction(user_id, status, amount=0.0):
+    conn = sqlite3.connect('tokens_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''UPDATE transactions 
+           SET status = ?, amount = ? 
+           WHERE user_id = ? AND status = 'pending'
+           AND id = (SELECT MAX(id) FROM transactions WHERE user_id = ? AND status = 'pending')''',
+        (status, amount, user_id, user_id)
+    )
+    conn.commit()
+    conn.close()
 
 # Клавиатуры
 def get_start_keyboard():
@@ -82,20 +125,7 @@ def get_admin_keyboard(file_id: str):
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     # Сохраняем пользователя в БД
-    user_data = {
-        "user_id": message.from_user.id,
-        "username": message.from_user.username,
-        "first_name": message.from_user.first_name,
-        "balance": 0.00
-    }
-    
-    # Проверяем существует ли пользователь
-    existing = await supabase_query("GET", "users", filters={
-        "eq": {"user_id": message.from_user.id}
-    })
-    
-    if not existing:
-        await supabase_query("POST", "users", data=user_data)
+    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
@@ -124,14 +154,9 @@ async def handle_document(message: types.Message):
         "file_name": message.document.file_name
     }
     
-    # Создаем транзакцию в БД
-    transaction_data = {
-        "user_id": message.from_user.id,
-        "file_name": message.document.file_name,
-        "status": "pending",
-        "amount": 0.00
-    }
-    await supabase_query("POST", "transactions", data=transaction_data)
+    # Сохраняем пользователя и создаем транзакцию
+    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    add_transaction(message.from_user.id, message.document.file_name)
     
     # Пересылаем файл админу
     await bot.send_document(
@@ -150,10 +175,7 @@ async def block_file(callback: types.CallbackQuery):
     
     if user_data:
         # Обновляем статус транзакции
-        await supabase_query("PATCH", "transactions", 
-            data={"status": "blocked"},
-            filters={"eq": {"user_id": user_data["user_id"], "status": "pending"}}
-        )
+        update_transaction(user_data["user_id"], "blocked")
         
         # Уведомляем пользователя
         await bot.send_message(user_data["user_id"], "❌ Блок, нет оплаты")
@@ -172,10 +194,7 @@ async def decline_file(callback: types.CallbackQuery):
     user_data = file_user_map.get(file_id)
     
     if user_data:
-        await supabase_query("PATCH", "transactions",
-            data={"status": "declined"},
-            filters={"eq": {"user_id": user_data["user_id"], "status": "pending"}}
-        )
+        update_transaction(user_data["user_id"], "declined")
         
         await bot.send_message(user_data["user_id"], "🔄 Всё слет, не оплата")
         
@@ -192,7 +211,7 @@ async def set_amount(callback: types.CallbackQuery, state: FSMContext):
     user_data = file_user_map.get(file_id)
     
     if user_data:
-        await state.update_data(current_file_id=file_id, current_user_id=user_data["user_id"])
+        await state.update_data(current_user_id=user_data["user_id"])
         await state.set_state(PaymentStates.waiting_for_amount)
         await callback.message.answer("💰 Введите сумму оплаты в долларах (например 5.50):")
     
@@ -201,29 +220,19 @@ async def set_amount(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(PaymentStates.waiting_for_amount)
 async def process_amount(message: types.Message, state: FSMContext):
     try:
-        amount = Decimal(message.text.replace(",", "."))
+        amount = float(message.text.replace(",", "."))
         if amount <= 0:
             raise ValueError
         
         data = await state.get_data()
         user_id = data["current_user_id"]
         
-        # Получаем текущий баланс
-        user_data = await supabase_query("GET", "users", filters={"eq": {"user_id": user_id}})
-        current_balance = Decimal(str(user_data[0]["balance"])) if user_data else Decimal("0")
-        new_balance = current_balance + amount
+        # Обновляем баланс и транзакцию
+        update_balance(user_id, amount)
+        update_transaction(user_id, "paid", amount)
         
-        # Обновляем баланс
-        await supabase_query("PATCH", "users",
-            data={"balance": float(new_balance)},
-            filters={"eq": {"user_id": user_id}}
-        )
-        
-        # Обновляем транзакцию
-        await supabase_query("PATCH", "transactions",
-            data={"status": "paid", "amount": float(amount)},
-            filters={"eq": {"user_id": user_id, "status": "pending"}}
-        )
+        # Получаем актуальный баланс
+        new_balance = get_balance(user_id)
         
         # Уведомляем пользователя
         await bot.send_message(
@@ -240,15 +249,17 @@ async def process_amount(message: types.Message, state: FSMContext):
 
 @dp.message(Command("balance"))
 async def check_balance(message: types.Message):
-    user_data = await supabase_query("GET", "users", filters={"eq": {"user_id": message.from_user.id}})
-    if user_data:
-        balance = Decimal(str(user_data[0]["balance"]))
-        await message.answer(f"💰 Ваш баланс: ${balance:.2f}")
-    else:
-        await message.answer("💰 Ваш баланс: $0.00")
+    balance = get_balance(message.from_user.id)
+    await message.answer(f"💰 Ваш баланс: ${balance:.2f}")
 
+# Запуск бота
 async def main():
-    print("Бот запущен!")
+    # Инициализируем БД
+    init_db()
+    print("✅ База данных инициализирована")
+    print("🤖 Бот запущен!")
+    
+    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
